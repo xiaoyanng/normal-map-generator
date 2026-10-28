@@ -1,0 +1,50 @@
+{
+  "name": "normal-map-generator",
+  "version": "0.1.0",
+  "description": "Normal map generator engine for the browser and Node: normal, height, displacement, roughness and ambient occlusion maps from a photo or texture, with an optional AI photo mode and a WebGL 3D preview.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://normalmap.io",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaoyanng/normal-map-generator.git"
+  },
+  "keywords": [
+    "normal-map",
+    "normal-map-generator",
+    "height-map",
+    "roughness-map",
+    "ambient-occlusion",
+    "pbr",
+    "texture",
+    "webgl",
+    "gamedev"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "prepare": "tsup src/index.ts --format esm --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "example": "tsx examples/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "onnxruntime-web": "1.31.1",
+    "sharp": "0.35.2",
+    "tsup": "^8.5.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "4.1.10"
+  },
+  "packageManager": "pnpm@10.30.3"
+}
