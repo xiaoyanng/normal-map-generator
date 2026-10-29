@@ -148,6 +148,39 @@ function displacedHit(
   return [x / len, y / len, near / len];
 }
 
+const BOX = (() => {
+  const v = [-0.55, 0.62, 0.56];
+  const l = Math.hypot(...v);
+  return v.map((c) => c / l);
+})();
+
+/**
+ * The live preview's photo studio (same as its shader): a gradient from a
+ * dark floor to a grey ceiling and a softbox up and to the left, blurred
+ * and dimmed by roughness. Linear RGB seen in direction (x, y, z), view
+ * space with y up and z toward the viewer.
+ */
+function studio(
+  x: number,
+  y: number,
+  z: number,
+  rough: number
+): [number, number, number] {
+  const l = Math.hypot(x, y, z) || 1;
+  const t = Math.min(1, Math.max(0, (y / l + 0.3) / 1.2));
+  const up = t * t * (3 - 2 * t);
+  const width = 0.1 + rough * 0.9;
+  const cos = (x * BOX[0] + y * BOX[1] + z * BOX[2]) / l;
+  const angle = Math.acos(Math.min(1, Math.max(-1, cos)));
+  const glow =
+    Math.exp(-(angle * angle) / (width * width)) * Math.min(3, 0.3 / width);
+  return [
+    0.03 + (0.3 - 0.03) * up + glow,
+    0.03 + (0.31 - 0.03) * up + 0.98 * glow,
+    0.03 + (0.34 - 0.03) * up + 0.95 * glow,
+  ];
+}
+
 /**
  * A material ball: the maps on a sphere, lit from the upper left, seen
  * straight on. Same mapping as the live preview's sphere (the texture goes
@@ -218,15 +251,33 @@ export function shadeSphere(
       const d = ndh * ndh * (a * a - 1) + 1;
       const spec = ((a * a) / (Math.PI * d * d)) * 0.04 * ndl;
       // A soft fill from below-right so the dark side is not black.
-      const fill = Math.max(0, 0.4 * nx - 0.3 * ny + 0.5 * nz) * 0.12;
-      const shadeOf = (c: number) =>
+      const fill = Math.max(0, 0.4 * nx - 0.3 * ny + 0.5 * nz) * 0.06;
+      // The live preview's studio: ambient light from the room and its
+      // reflection, sharp on smooth spots and blurred on rough ones. The
+      // viewer looks straight on, so the mirror direction is 2 nz n - z.
+      const ambient = studio(nx, ny, nz, 1);
+      const reflection = studio(
+        2 * nz * nx,
+        2 * nz * ny,
+        2 * nz * nz - 1,
+        rough
+      );
+      const fresnel = 0.04 + 0.96 * (1 - Math.max(0, nz)) ** 5;
+      const gloss = fresnel * (1 - 0.7 * rough) * ao;
+      const shadeOf = (c: number, channel: number) =>
         toSrgb(
-          c ** 2.2 * (0.1 * ao + fill + 1.25 * ndl * (0.55 + 0.45 * ao)) + spec
+          c ** 2.2 *
+            (0.05 * ao +
+              fill +
+              1.25 * ndl * (0.55 + 0.45 * ao) +
+              0.55 * ao * ambient[channel]) +
+            spec +
+            gloss * reflection[channel]
         );
       const i = (py * size + px) * 4;
-      out[i] = shadeOf(sample(albedo.r, width, height, u, v));
-      out[i + 1] = shadeOf(sample(albedo.g, width, height, u, v));
-      out[i + 2] = shadeOf(sample(albedo.b, width, height, u, v));
+      out[i] = shadeOf(sample(albedo.r, width, height, u, v), 0);
+      out[i + 1] = shadeOf(sample(albedo.g, width, height, u, v), 1);
+      out[i + 2] = shadeOf(sample(albedo.b, width, height, u, v), 2);
       out[i + 3] = 255 * coverage;
     }
   }

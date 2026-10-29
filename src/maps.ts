@@ -1,9 +1,11 @@
 import {
   blur,
+  fitSize,
   luminance,
   normalizeRange,
   percentiles,
   type RgbImage,
+  resizePlane,
 } from './image';
 import { heightFromSlopes } from './integrate';
 
@@ -38,6 +40,15 @@ export interface MapSettings {
   roughnessInvert: boolean;
   /** Ambient occlusion strength, 1 = default. */
   aoStrength: number;
+  /** Base color: brightness offset (0 = as is) and contrast (1 = as is). */
+  brightness: number;
+  contrast: number;
+  /**
+   * Base color: how much of the light baked into the photo to divide out,
+   * 0 (none) to 1: uneven light across it, and with AI normals also the
+   * shading of every bump and the darkness of its crevices.
+   */
+  delight: number;
 }
 
 export const DEFAULT_SETTINGS: MapSettings = {
@@ -54,6 +65,9 @@ export const DEFAULT_SETTINGS: MapSettings = {
   roughnessLevel: 0,
   roughnessInvert: false,
   aoStrength: 1,
+  brightness: 0,
+  contrast: 1,
+  delight: 0,
 };
 
 /** All maps at the working size. Values are 0..1 (normal channels encoded). */
@@ -65,6 +79,10 @@ export interface MapSet {
   heightMap: Float32Array;
   roughness: Float32Array;
   ao: Float32Array;
+  /** Convex edges light, cavities dark, flat 0.5. */
+  curvature: Float32Array;
+  /** Base color: the source after brightness, contrast and delighting. */
+  albedo: RgbImage;
 }
 
 /** Slopes (dh/dx, dh/dy with y down) of a height plane, Sobel per pixel. */
@@ -156,15 +174,23 @@ const HEIGHT_MAP_DEPTH = 0.2;
  * measure 0.86 or more, a smooth dome about 0.3, a dome with light noise
  * about 0.65. The blend between 0.5 and 0.75 avoids a sudden jump.
  */
-function heightMapShare(image: RgbImage, lum: Float32Array): number {
-  const { width, height } = image;
-  const n = width * height;
+function heightMapShare(image: RgbImage, full: Float32Array): number {
+  const n0 = image.width * image.height;
   let chroma = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < n0; i++) {
     chroma +=
       Math.abs(image.r[i] - image.g[i]) + Math.abs(image.g[i] - image.b[i]);
   }
-  if (chroma / n > 0.01) return 0;
+  if (chroma / n0 > 0.01) return 0;
+  // Measured at 1024 px at most, the size it was tuned at: in a larger
+  // 8-bit file the one-level steps up a gentle slope would count as fine
+  // detail and make a clean height map look like a photo.
+  const { width, height } = fitSize(image.width, image.height, 1024);
+  const lum =
+    width === image.width
+      ? full
+      : resizePlane(full, image.width, image.height, width, height);
+  const n = width * height;
   const sigma = Math.max(1, (3 * Math.max(width, height)) / 1024);
   const smooth = blur(lum, width, height, sigma, false);
   const fine = new Float32Array(n);
@@ -173,6 +199,16 @@ function heightMapShare(image: RgbImage, lum: Float32Array): number {
   const [fp, fq] = sobel(fine, width, height, false);
   const share = rms(fp, fq) / rms(p, q);
   return Math.min(1, Math.max(0, (0.75 - share) / 0.25));
+}
+
+/**
+ * How much an image looks like a clean height map rather than a photo, 0
+ * to 1 (photos score 0). Above 0, AI photo mode is the wrong tool: the
+ * model is trained on photos and flattens smooth height maps, so the
+ * generator uses the image's own slopes instead.
+ */
+export function heightMapScore(image: RgbImage): number {
+  return heightMapShare(image, luminance(image));
 }
 
 /**
@@ -188,7 +224,8 @@ export function computeMaps(
   const { width, height } = image;
   const n = width * height;
   const wrap = settings.tile;
-  const lum = luminance(image);
+  const source = adjust(image, settings.brightness, settings.contrast);
+  const lum = luminance(source);
   const weights = {
     fine: settings.fine,
     medium: settings.medium,
@@ -238,18 +275,37 @@ export function computeMaps(
       ...weights,
       base: settings.flattenLighting ? 0 : 1,
     });
-    [p, q] = sobel(heightPlane, width, height, wrap);
+    const clean = heightMapShare(image, lum);
+    // A clean height map stored in 8 bits climbs a gentle slope one gray
+    // level every few pixels; a 3x3 slope reads the flat runs between the
+    // steps as level ground. A light blur (more for larger images) turns
+    // the steps back into the slope they came from.
+    let slopePlane = heightPlane;
+    if (clean > 0) {
+      const soft = blur(
+        heightPlane,
+        width,
+        height,
+        Math.max(width, height) / 1024,
+        wrap
+      );
+      slopePlane = heightPlane.map((v, i) => v + (soft[i] - v) * clean);
+    }
+    [p, q] = sobel(slopePlane, width, height, wrap);
     // Photos: the same default look at any size and contrast, scaled to a
     // target slope. Clean height maps: their real slopes, so a smooth dome
     // keeps a clear direction all the way up its sides (a global target
-    // would flatten them against the steep rim). Capped at three times the
-    // photo scale in case a photo is taken for a height map.
+    // would flatten them against the steep rim). In between, capped at
+    // three times the photo scale in case a photo is taken for a height
+    // map; the cap fades out as the image gets clearly clean, because a
+    // steep rim makes the photo scale tiny and the cap would flatten it.
     const photoScale = TARGET_SLOPE / rms(p, q);
-    const clean = heightMapShare(image, lum);
-    const depthScale = Math.min(
-      3 * photoScale,
-      Math.max(photoScale, HEIGHT_MAP_DEPTH * Math.max(width, height))
+    const realScale = Math.max(
+      photoScale,
+      HEIGHT_MAP_DEPTH * Math.max(width, height)
     );
+    const capped = Math.min(3 * photoScale, realScale);
+    const depthScale = capped + (realScale - capped) * clean;
     const scale =
       (photoScale + (depthScale - photoScale) * clean) * settings.strength;
     for (let i = 0; i < n; i++) {
@@ -273,6 +329,10 @@ export function computeMaps(
 
   const heightMap = normalizeRange(heightPlane);
   const ao = aoMap(heightMap, width, height, wrap, settings.aoStrength);
+  // Delighting divides by the photo's own shading: from the normals only
+  // when they come from the AI (image-mode normals are the brightness
+  // itself, and dividing them out would wipe the texture).
+  const shapeNormals = settings.source === 'ai' && aiNormal;
   return {
     width,
     height,
@@ -280,7 +340,179 @@ export function computeMaps(
     heightMap,
     roughness: roughnessMap(lum, ao, settings),
     ao,
+    curvature: curvatureMap(p, q, width, height, wrap),
+    albedo: delightImage(source, lum, settings.delight, wrap, {
+      p: shapeNormals ? p : null,
+      q: shapeNormals ? q : null,
+      ao,
+    }),
   };
+}
+
+/** Brightness offset and contrast around mid gray, per channel. */
+function adjust(image: RgbImage, brightness: number, contrast: number) {
+  if (brightness === 0 && contrast === 1) return image;
+  const f = (plane: Float32Array) =>
+    plane.map((v) => {
+      const out = (v - 0.5) * contrast + 0.5 + brightness;
+      return out < 0 ? 0 : out > 1 ? 1 : out;
+    });
+  return { ...image, r: f(image.r), g: f(image.g), b: f(image.b) };
+}
+
+/**
+ * Convexity from the slopes: the negative Laplacian of the height, at a
+ * fine and a medium radius, scaled so the strongest edges reach white
+ * (and the deepest cavities black) and flat ground stays mid gray.
+ */
+function curvatureMap(
+  p: Float32Array,
+  q: Float32Array,
+  width: number,
+  height: number,
+  wrap: boolean
+): Float32Array {
+  const n = width * height;
+  const k = Math.max(width, height) / 1024;
+  const ix = (x: number) =>
+    wrap ? (x + width) % width : x < 0 ? 0 : x >= width ? width - 1 : x;
+  const iy = (y: number) =>
+    wrap ? (y + height) % height : y < 0 ? 0 : y >= height ? height - 1 : y;
+  const sum = new Float32Array(n);
+  for (const sigma of [1 * k, 3 * k]) {
+    const bp = blur(p, width, height, sigma, wrap);
+    const bq = blur(q, width, height, sigma, wrap);
+    const lap = new Float32Array(n);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const dp = (bp[y * width + ix(x + 1)] - bp[y * width + ix(x - 1)]) / 2;
+        const dq = (bq[iy(y + 1) * width + x] - bq[iy(y - 1) * width + x]) / 2;
+        lap[y * width + x] = -(dp + dq);
+      }
+    }
+    const [lo, hi] = percentiles(lap, [0.01, 0.99]);
+    const range = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+    for (let i = 0; i < n; i++) sum[i] += lap[i] / range;
+  }
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = 0.5 + 0.25 * sum[i];
+    out[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+  }
+  return out;
+}
+
+/**
+ * Takes the light baked into a photo out of its colors, by `amount` (0 to
+ * 1). The photo is modelled as base color times shading: a slow change of
+ * light across the image, plus, when the slopes come from the AI, the
+ * light and shade of every bump (fitted from the photo as brightness
+ * against surface direction) and the darkening of crevices.
+ */
+function delightImage(
+  image: RgbImage,
+  lum: Float32Array,
+  amount: number,
+  wrap: boolean,
+  shape: { p: Float32Array | null; q: Float32Array | null; ao: Float32Array }
+): RgbImage {
+  if (amount <= 0) return image;
+  const { width, height } = image;
+  const n = width * height;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += lum[i];
+  mean = mean / n || 1;
+  // Light at two scales: across the image (a bright corner, a dark side)
+  // and across a few stones or boards (the shadow one casts on the next).
+  // The finer layer counts at 60% so real color changes survive.
+  const size = Math.max(width, height);
+  const slow = blur(lum, width, height, size / 8, wrap);
+  const mid = blur(lum, width, height, size / 48, wrap);
+  const shading = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const across = Math.max(0.03, slow[i] / mean);
+    const local = Math.max(0.03, mid[i]) / Math.max(0.03, slow[i]);
+    shading[i] = across * local ** 0.6;
+  }
+
+  if (shape.p && shape.q) {
+    // Brightness (with the slow light divided out) against the surface
+    // direction: lum = a + b * nx + c * ny, least squares on a sample.
+    const nx = new Float32Array(n);
+    const ny = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const len = Math.sqrt(shape.p[i] ** 2 + shape.q[i] ** 2 + 1);
+      // OpenGL convention: x right, y up (q is the slope with y down).
+      nx[i] = -shape.p[i] / len;
+      ny[i] = shape.q[i] / len;
+    }
+    const m = new Float64Array(9);
+    const v = new Float64Array(3);
+    const stride = Math.max(1, Math.floor(n / 65536));
+    for (let i = 0; i < n; i += stride) {
+      const row = [1, nx[i], ny[i]];
+      const y = lum[i] / shading[i];
+      for (let r = 0; r < 3; r++) {
+        v[r] += row[r] * y;
+        for (let c = 0; c < 3; c++) m[r * 3 + c] += row[r] * row[c];
+      }
+    }
+    const [a, b, c] = solve3(m, v);
+    if (a > 0.02) {
+      for (let i = 0; i < n; i++) {
+        const bump = 1 + (b * nx[i] + c * ny[i]) / a;
+        const cavity = 0.7 + 0.3 * shape.ao[i];
+        shading[i] *= Math.max(0.2, bump) * cavity;
+      }
+    }
+  }
+
+  // Divide, then bring the average back to the photo's own brightness.
+  const factor = new Float32Array(n);
+  let after = 0;
+  for (let i = 0; i < n; i++) {
+    factor[i] = 1 / Math.min(4, Math.max(0.18, shading[i])) ** amount;
+    after += lum[i] * factor[i];
+  }
+  const keep = mean / (after / n || 1);
+  // Shadows lit by the sky are bluer than the sunlit parts; lifted, that
+  // tint shows. The more a pixel is lifted, the more its color moves to
+  // the photo's average color (its brightness stays).
+  const avg = [image.r, image.g, image.b].map((plane) => {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += plane[i];
+    return sum / n / mean;
+  });
+  const out = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  const planes = [image.r, image.g, image.b];
+  for (let i = 0; i < n; i++) {
+    const gain = factor[i] * keep;
+    const neutral = Math.min(1, Math.max(0, (gain - 1.3) / 1.5)) * amount;
+    const l = Math.max(1e-4, lum[i]);
+    for (let c = 0; c < 3; c++) {
+      const tint = planes[c][i] / l;
+      const value = l * gain * (tint + (avg[c] - tint) * neutral);
+      out[c][i] = value < 0 ? 0 : value > 1 ? 1 : value;
+    }
+  }
+  return { ...image, r: out[0], g: out[1], b: out[2] };
+}
+
+/** Solves a 3x3 system (row-major `m`) by Cramer's rule; zeros if singular. */
+function solve3(m: Float64Array, v: Float64Array): [number, number, number] {
+  const det = (a: ArrayLike<number>) =>
+    a[0] * (a[4] * a[8] - a[5] * a[7]) -
+    a[1] * (a[3] * a[8] - a[5] * a[6]) +
+    a[2] * (a[3] * a[7] - a[4] * a[6]);
+  const d = det(m);
+  if (Math.abs(d) < 1e-12) return [0, 0, 0];
+  const out: number[] = [];
+  for (let col = 0; col < 3; col++) {
+    const mc = Float64Array.from(m);
+    for (let r = 0; r < 3; r++) mc[r * 3 + col] = v[r];
+    out.push(det(mc) / d);
+  }
+  return out as [number, number, number];
 }
 
 /**

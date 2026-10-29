@@ -58,6 +58,22 @@ uniform vec3 uEye;
 uniform float uFlipY;
 uniform float uBump;
 out vec4 outColor;
+
+// A photo studio around the object (view space, y up, z toward the
+// viewer): a soft gradient from a dark floor to a grey ceiling and a large
+// softbox up and to the left. Rough surfaces see it blurred and dim,
+// smooth ones see a sharp, bright reflection: this is what makes
+// roughness visible.
+vec3 studio(vec3 dir, float rough) {
+  vec3 room = mix(vec3(0.03), vec3(0.30, 0.31, 0.34),
+    smoothstep(-0.3, 0.9, dir.y));
+  vec3 box = normalize(vec3(-0.55, 0.62, 0.56));
+  float width = 0.1 + rough * 0.9;
+  float angle = acos(clamp(dot(dir, box), -1.0, 1.0));
+  float glow = exp(-(angle * angle) / (width * width));
+  return room + vec3(1.0, 0.98, 0.95) * glow * min(3.0, 0.3 / width);
+}
+
 void main() {
   vec3 N = normalize(vNormal);
   vec3 T = normalize(vTangent - N * dot(N, vTangent));
@@ -80,8 +96,13 @@ void main() {
   float d = ndh * ndh * (a * a - 1.0) + 1.0;
   float spec = (a * a) / (3.14159 * d * d) * 0.04 * ndl;
   float falloff = 2.0 / (1.0 + 0.3 * dist * dist);
-  vec3 color = albedo * (0.22 * ao + ndl * falloff * (0.6 + 0.4 * ao))
-    + vec3(spec * falloff);
+  float ndv = max(dot(n, V), 0.0);
+  float fresnel = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+  vec3 reflection = studio(reflect(-V, n), rough) * fresnel
+    * mix(1.0, 0.3, rough) * ao;
+  vec3 ambient = albedo * studio(n, 1.0) * 0.55 * ao;
+  vec3 color = albedo * (0.1 * ao + ndl * falloff * (0.6 + 0.4 * ao))
+    + vec3(spec * falloff) + ambient + reflection;
   outColor = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);
 }`;
 

@@ -9,9 +9,10 @@ The normal map generator engine behind [normalmap.io](https://normalmap.io), as 
 ## Features
 
 - **Two ways to read the surface.** Image mode works from the picture itself, multi-scale, with separate weights for fine, medium and large bumps. AI photo mode runs the [DeepBump](https://github.com/HugoTini/DeepBump) network, which tells real bumps from shadows and color changes.
-- **Height maps stay height maps.** A clean grayscale height map is detected and converted with its real slopes, so a dome stays a dome instead of being flattened.
+- **Height maps stay height maps.** A clean grayscale height map is detected (`heightMapScore`, photos score 0) and converted with its real slopes, so a dome stays a dome; 8-bit steps on gentle slopes are smoothed out first. Use it to skip AI mode for height maps.
 - **Real height from normals.** Height and displacement come from integrating the normal field (Frankot-Chellappa, FFT), not from brightness.
-- **Roughness and ambient occlusion** from the same surface, with contrast, level and invert controls.
+- **Roughness, ambient occlusion and curvature** from the same surface, with contrast, level and invert controls.
+- **Shadow removal** for the base color (`delight`): the light baked into the photo is divided out, across the image and, with AI normals, bump by bump. Plus brightness and contrast.
 - **Seamless textures.** A variance-preserving blend makes any image tile, and every filter wraps at the edges.
 - **OpenGL or DirectX** normal maps (green channel up or down).
 - **16-bit PNG** for height and displacement, an **RGBA PNG** writer that keeps straight alpha for packed maps (Unity metallic + smoothness, HDRP mask), and a ZIP writer for the whole set. No image libraries needed.
@@ -47,6 +48,7 @@ async function mapsFromFile(file: File) {
   const maps = computeMaps(image, { ...DEFAULT_SETTINGS, source: 'image' });
   // RGBA bytes, ready for an ImageData or an 8-bit PNG.
   return {
+    baseColor: toRgba(maps.albedo.r, maps.albedo.g, maps.albedo.b),
     normal: toRgba(...maps.normal),
     roughness: toRgba(maps.roughness),
     ao: toRgba(maps.ao),
@@ -70,6 +72,8 @@ The engine is pure functions on `Float32Array`s, so it moves into a Web Worker a
 | `tile` | `false` | The image tiles (run `makeSeamless` on it first) |
 | `roughnessContrast`, `roughnessLevel`, `roughnessInvert` | `1`, `0`, `false` | Roughness tuning |
 | `aoStrength` | `1` | Ambient occlusion strength |
+| `brightness`, `contrast` | `0`, `1` | Base color adjustments |
+| `delight` | `0` | Remove the light baked into the photo, 0 to 1 (base color only) |
 
 ### OpenGL or DirectX?
 
