@@ -8,9 +8,17 @@ import {
   resizePlane,
 } from './image';
 import { heightFromSlopes } from './integrate';
+import {
+  completeNormal,
+  detectNormalFormat,
+  type FormatGuess,
+} from './normal-input';
 
-/** Where the surface shape comes from. */
-export type SurfaceSource = 'ai' | 'image';
+/**
+ * Where the surface shape comes from: the AI model, the image's
+ * brightness, or the image itself when it already is a normal map.
+ */
+export type SurfaceSource = 'ai' | 'image' | 'normal';
 
 /** Green channel convention: OpenGL (Y+, Blender, Unity, Godot) or DirectX. */
 export type NormalFormat = 'opengl' | 'directx';
@@ -40,6 +48,11 @@ export interface MapSettings {
   roughnessInvert: boolean;
   /** Ambient occlusion strength, 1 = default. */
   aoStrength: number;
+  /**
+   * Normal source only: the green convention of the uploaded normal map,
+   * or `auto` to tell it from the map (see `detectNormalFormat`).
+   */
+  normalInput: NormalFormat | 'auto';
   /** Base color: brightness offset (0 = as is) and contrast (1 = as is). */
   brightness: number;
   contrast: number;
@@ -65,6 +78,7 @@ export const DEFAULT_SETTINGS: MapSettings = {
   roughnessLevel: 0,
   roughnessInvert: false,
   aoStrength: 1,
+  normalInput: 'auto',
   brightness: 0,
   contrast: 1,
   delight: 0,
@@ -83,6 +97,8 @@ export interface MapSet {
   curvature: Float32Array;
   /** Base color: the source after brightness, contrast and delighting. */
   albedo: RgbImage;
+  /** Normal source only: the convention the uploaded map was read as. */
+  normalInput?: FormatGuess & { detected: boolean };
 }
 
 /** Slopes (dh/dx, dh/dy with y down) of a height plane, Sobel per pixel. */
@@ -224,7 +240,26 @@ export function computeMaps(
   const { width, height } = image;
   const n = width * height;
   const wrap = settings.tile;
-  const source = adjust(image, settings.brightness, settings.contrast);
+  // A normal map as the input: its colors are directions, not a surface
+  // color, so the base color is plain mid gray.
+  const fromNormal = settings.source === 'normal';
+  let normalInput: MapSet['normalInput'];
+  let shapeNormal = aiNormal;
+  if (fromNormal) {
+    const planes = completeNormal([image.r, image.g, image.b]);
+    const guess =
+      settings.normalInput === 'auto'
+        ? detectNormalFormat(planes, width, height)
+        : { format: settings.normalInput, confidence: 1 };
+    normalInput = { ...guess, detected: settings.normalInput === 'auto' };
+    shapeNormal =
+      guess.format === 'directx'
+        ? [planes[0], planes[1].map((v) => 1 - v), planes[2]]
+        : planes;
+  }
+  const source = fromNormal
+    ? grayImage(width, height)
+    : adjust(image, settings.brightness, settings.contrast);
   const lum = luminance(source);
   const weights = {
     fine: settings.fine,
@@ -236,16 +271,16 @@ export function computeMaps(
   let q: Float32Array;
   let heightPlane: Float32Array;
 
-  if (settings.source === 'ai' && aiNormal) {
-    // Slopes from the predicted normals (OpenGL: green up, so dh/dy = ny/nz
-    // with y down), reweighted band by band. Blurring slopes is the same as
-    // blurring the height they come from.
+  if ((settings.source === 'ai' || fromNormal) && shapeNormal) {
+    // Slopes from the predicted (or uploaded) normals (OpenGL: green up,
+    // so dh/dy = ny/nz with y down), reweighted band by band. Blurring
+    // slopes is the same as blurring the height they come from.
     const rawP = new Float32Array(n);
     const rawQ = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      const nx = aiNormal[0][i] * 2 - 1;
-      const ny = aiNormal[1][i] * 2 - 1;
-      const nz = Math.max(0.05, aiNormal[2][i] * 2 - 1);
+      const nx = shapeNormal[0][i] * 2 - 1;
+      const ny = shapeNormal[1][i] * 2 - 1;
+      const nz = Math.max(0.05, shapeNormal[2][i] * 2 - 1);
       rawP[i] = -nx / nz;
       rawQ[i] = ny / nz;
     }
@@ -257,16 +292,23 @@ export function computeMaps(
       q[i] *= settings.strength;
     }
     heightPlane = heightFromSlopes(p, q, width, height, wrap);
-    // Integration drifts at the largest scale; keep shapes up to about a
-    // tenth of the image and drop the slow gradient across it.
-    const drift = blur(
-      heightPlane,
-      width,
-      height,
-      Math.max(width, height) / 20,
-      wrap
-    );
-    for (let i = 0; i < n; i++) heightPlane[i] -= drift[i];
+    // Predicted normals drift when integrated at the largest scale; keep
+    // shapes up to about a tenth of the image and drop the slow gradient
+    // across it. An uploaded normal map comes from a real height or bake,
+    // so its large shapes stay; only a lean across the whole image (from
+    // slopes that do not quite agree) is taken out, as a best-fit plane.
+    if (fromNormal) {
+      removePlane(heightPlane, width, height);
+    } else {
+      const drift = blur(
+        heightPlane,
+        width,
+        height,
+        Math.max(width, height) / 20,
+        wrap
+      );
+      for (let i = 0; i < n; i++) heightPlane[i] -= drift[i];
+    }
   } else {
     // Brightness as height. The base band holds the largest shapes; it is
     // dropped only on request, to remove a lighting gradient from a photo.
@@ -341,12 +383,51 @@ export function computeMaps(
     roughness: roughnessMap(lum, ao, settings),
     ao,
     curvature: curvatureMap(p, q, width, height, wrap),
-    albedo: delightImage(source, lum, settings.delight, wrap, {
-      p: shapeNormals ? p : null,
-      q: shapeNormals ? q : null,
-      ao,
-    }),
+    albedo: fromNormal
+      ? source
+      : delightImage(source, lum, settings.delight, wrap, {
+          p: shapeNormals ? p : null,
+          q: shapeNormals ? q : null,
+          ao,
+        }),
+    normalInput,
   };
+}
+
+/** Subtracts the least-squares plane a + b x + c y, in place. */
+function removePlane(h: Float32Array, width: number, height: number) {
+  // x and y centred, so the three terms are independent.
+  let sh = 0;
+  let sx = 0;
+  let sy = 0;
+  let xx = 0;
+  let yy = 0;
+  const cx = (width - 1) / 2;
+  const cy = (height - 1) / 2;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const v = h[y * width + x];
+      sh += v;
+      sx += v * (x - cx);
+      sy += v * (y - cy);
+      xx += (x - cx) ** 2;
+      yy += (y - cy) ** 2;
+    }
+  }
+  const a = sh / (width * height);
+  const b = xx ? sx / xx : 0;
+  const c = yy ? sy / yy : 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      h[y * width + x] -= a + b * (x - cx) + c * (y - cy);
+    }
+  }
+}
+
+/** Plain mid gray, the base color when the input is a normal map. */
+function grayImage(width: number, height: number): RgbImage {
+  const plane = new Float32Array(width * height).fill(0.5);
+  return { width, height, r: plane, g: plane, b: plane };
 }
 
 /** Brightness offset and contrast around mid gray, per channel. */

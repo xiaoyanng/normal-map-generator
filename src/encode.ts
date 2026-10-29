@@ -38,7 +38,8 @@ export const browserDeflate: Deflate = async (data) => {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 };
 
-function chunk(type: string, data: Uint8Array): Uint8Array {
+/** One PNG chunk: length, type, data and CRC. */
+export function chunkBytes(type: string, data: Uint8Array): Uint8Array {
   const out = new Uint8Array(12 + data.length);
   const view = new DataView(out.buffer);
   view.setUint32(0, data.length);
@@ -76,11 +77,11 @@ export async function encodeGray16Png(
   header[9] = 0; // grayscale
   const parts = [
     new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk('IHDR', header),
-    chunk('IDAT', await deflate(raw)),
-    chunk('IEND', new Uint8Array(0)),
+    chunkBytes('IHDR', header),
+    chunkBytes('IDAT', await deflate(raw)),
+    chunkBytes('IEND', new Uint8Array(0)),
   ];
-  return concat(parts);
+  return concatBytes(parts);
 }
 
 /**
@@ -112,15 +113,61 @@ export async function encodeRgbaPng(
   hv.setUint32(4, height);
   header[8] = 8; // bit depth
   header[9] = 6; // RGBA
-  return concat([
+  return concatBytes([
     new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
-    chunk('IHDR', header),
-    chunk('IDAT', await deflate(raw)),
-    chunk('IEND', new Uint8Array(0)),
+    chunkBytes('IHDR', header),
+    chunkBytes('IDAT', await deflate(raw)),
+    chunkBytes('IEND', new Uint8Array(0)),
   ]);
 }
 
-function concat(parts: Uint8Array[]): Uint8Array {
+/**
+ * 8-bit PNG straight from RGBA bytes, for full-size images (an 8K map as
+ * float planes would need a gigabyte). Written as RGB when every pixel is
+ * opaque, else RGBA with the alpha kept as it is.
+ */
+export async function encodePng8(
+  rgba: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  deflate: Deflate
+): Promise<Uint8Array> {
+  let opaque = true;
+  for (let i = 3; i < rgba.length; i += 4) {
+    if (rgba[i] !== 255) {
+      opaque = false;
+      break;
+    }
+  }
+  const channels = opaque ? 3 : 4;
+  const stride = width * channels + 1;
+  const raw = new Uint8Array(stride * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * stride] = 0;
+    let o = y * stride + 1;
+    let i = y * width * 4;
+    for (let x = 0; x < width; x++, i += 4) {
+      raw[o++] = rgba[i];
+      raw[o++] = rgba[i + 1];
+      raw[o++] = rgba[i + 2];
+      if (!opaque) raw[o++] = rgba[i + 3];
+    }
+  }
+  const header = new Uint8Array(13);
+  const hv = new DataView(header.buffer);
+  hv.setUint32(0, width);
+  hv.setUint32(4, height);
+  header[8] = 8; // bit depth
+  header[9] = opaque ? 2 : 6; // RGB or RGBA
+  return concatBytes([
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunkBytes('IHDR', header),
+    chunkBytes('IDAT', await deflate(raw)),
+    chunkBytes('IEND', new Uint8Array(0)),
+  ]);
+}
+
+export function concatBytes(parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
   for (const part of parts) {
@@ -174,5 +221,5 @@ export function makeZip(
   ev.setUint16(10, files.length, true);
   ev.setUint32(12, centralSize, true);
   ev.setUint32(16, offset, true);
-  return concat([...locals, ...centrals, end]);
+  return concatBytes([...locals, ...centrals, end]);
 }

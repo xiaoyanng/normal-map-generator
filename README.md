@@ -19,6 +19,8 @@ The normal map generator engine behind [normalmap.io](https://normalmap.io), as 
 - **Software material balls** (`shadeSphere`), with optional displacement that changes the outline, for thumbnails and docs.
 - **WebGL2 3D preview**: plane or sphere with displacement, lit by a light that follows the pointer.
 - **Tiled inference** for any 256 px image-to-normals model, at any image size, without visible tile seams.
+- **Normal maps as input** (`source: 'normal'`): rebuild height and displacement from an existing normal map. OpenGL or DirectX is detected from the curl of the slope field (`detectNormalFormat`), and two-channel maps get their Z rebuilt.
+- **Byte-exact PNG rewriting** (`readPng`, `flipGreen`, `writePng`): flip the green channel of a normal map with alpha, 16-bit samples, palette and color profile kept, no canvas involved.
 
 ## Install
 

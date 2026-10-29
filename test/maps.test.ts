@@ -283,3 +283,77 @@ describe('normal map engine, base color and curvature', () => {
     expect(Math.abs(corner - 0.5)).toBeLessThan(0.05);
   });
 });
+
+describe('normal map engine, normal map input', () => {
+  /** The dome's normal map in a format, fed back in as the input image. */
+  function domeNormalInput(format: 'opengl' | 'directx'): RgbImage {
+    const maps = imageMode({ format });
+    const [r, g, b] = maps.normal;
+    return { width: SIZE, height: SIZE, r, g, b };
+  }
+  const centerOverRim = (maps: MapSet) =>
+    maps.heightMap[C * SIZE + C] - maps.heightMap[C * SIZE + C - RADIUS + 5];
+
+  test.each([
+    'opengl',
+    'directx',
+  ] as const)('a %s normal map is detected and rebuilt into the dome', (format) => {
+    const maps = computeMaps(domeNormalInput(format), {
+      ...DEFAULT_SETTINGS,
+      source: 'normal',
+    });
+    expect(maps.normalInput?.format).toBe(format);
+    expect(maps.normalInput?.detected).toBe(true);
+    expect(maps.normalInput?.confidence).toBeGreaterThan(0.5);
+    expect(centerOverRim(maps)).toBeGreaterThan(0.2);
+    // A normal map has no color of its own: the base color is gray.
+    expect(maps.albedo.r[0]).toBe(0.5);
+  });
+
+  test('read with the wrong format, the dome turns into a saddle', () => {
+    const maps = computeMaps(domeNormalInput('opengl'), {
+      ...DEFAULT_SETTINGS,
+      source: 'normal',
+      normalInput: 'directx',
+    });
+    expect(maps.normalInput?.detected).toBe(false);
+    const right = computeMaps(domeNormalInput('opengl'), {
+      ...DEFAULT_SETTINGS,
+      source: 'normal',
+      normalInput: 'opengl',
+    });
+    const correlation = (a: Float32Array, b: Float32Array) => {
+      const mean = (v: Float32Array) => v.reduce((x, y) => x + y, 0) / v.length;
+      const [ma, mb] = [mean(a), mean(b)];
+      let ab = 0;
+      let aa = 0;
+      let bb = 0;
+      for (let i = 0; i < a.length; i++) {
+        ab += (a[i] - ma) * (b[i] - mb);
+        aa += (a[i] - ma) ** 2;
+        bb += (b[i] - mb) ** 2;
+      }
+      return ab / Math.sqrt(aa * bb);
+    };
+    const vertical = (m: MapSet) =>
+      m.heightMap[C * SIZE + C] - m.heightMap[(C - RADIUS + 5) * SIZE + C];
+    // The wrong reading keeps the dome left to right but sinks it top to
+    // bottom: a saddle, unrelated to the real shape.
+    expect(vertical(right)).toBeGreaterThan(0.2);
+    expect(vertical(maps)).toBeLessThan(0);
+    expect(Math.abs(correlation(maps.heightMap, right.heightMap))).toBeLessThan(
+      0.3
+    );
+  });
+
+  test('a two-channel normal map (blue left at 0) rebuilds the same dome', () => {
+    const full = domeNormalInput('opengl');
+    const twoChannel = { ...full, b: new Float32Array(full.b.length) };
+    const settings = { ...DEFAULT_SETTINGS, source: 'normal' as const };
+    const a = computeMaps(full, settings);
+    const b = computeMaps(twoChannel, settings);
+    expect(b.normalInput?.format).toBe('opengl');
+    expect(centerOverRim(b)).toBeGreaterThan(0.2);
+    expect(Math.abs(centerOverRim(b) - centerOverRim(a))).toBeLessThan(0.1);
+  });
+});

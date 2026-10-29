@@ -2,6 +2,7 @@ import { deflateSync, inflateSync } from 'node:zlib';
 import { describe, expect, test } from 'vitest';
 import {
   encodeGray16Png,
+  encodePng8,
   encodeRgbaPng,
 } from '../src/encode';
 
@@ -61,5 +62,26 @@ describe('PNG encoders', () => {
     const { depth, colorType, pixels } = readPng(png);
     expect({ depth, colorType }).toEqual({ depth: 16, colorType: 0 });
     expect([...pixels]).toEqual([0, 0, 0, 128, 0, 255, 255]);
+  });
+
+  test('8-bit from bytes: RGB when opaque, RGBA when not', async () => {
+    const opaque = await encodePng8(
+      Uint8Array.from([10, 20, 30, 255, 40, 50, 60, 255]),
+      2,
+      1,
+      deflate
+    );
+    const a = readPng(opaque);
+    expect(a.colorType).toBe(2);
+    expect([...a.pixels]).toEqual([0, 10, 20, 30, 40, 50, 60]);
+    const clear = await encodePng8(
+      Uint8Array.from([10, 20, 30, 0, 40, 50, 60, 255]),
+      2,
+      1,
+      deflate
+    );
+    const b = readPng(clear);
+    expect(b.colorType).toBe(6);
+    expect([...b.pixels]).toEqual([0, 10, 20, 30, 0, 40, 50, 60, 255]);
   });
 });
