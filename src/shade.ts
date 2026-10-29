@@ -95,16 +95,72 @@ function sample(
   return a * (1 - ty) + b * ty;
 }
 
+/** Texture coordinates of a unit sphere direction (the preview's mapping). */
+function sphereUv(sx: number, sy: number, sz: number) {
+  const theta = Math.acos(Math.min(1, Math.max(-1, sy)));
+  const phi = Math.atan2(-sz, sx);
+  return { phi, u: phi / Math.PI, v: theta / Math.PI };
+}
+
+/**
+ * Where a view ray at (x, y) first meets a sphere whose radius follows the
+ * height map: `radius * (1 + displace * (h - 0.5))`. Returns the unit
+ * direction of the hit, or null when the ray misses.
+ */
+function displacedHit(
+  x: number,
+  y: number,
+  radius: number,
+  displace: number,
+  maps: MapSet
+): [number, number, number] | null {
+  const { width, height } = maps;
+  const outer = radius * (1 + displace / 2);
+  const reach = outer * outer - x * x - y * y;
+  if (reach <= 0) return null;
+  const inside = (z: number) => {
+    const len = Math.hypot(x, y, z);
+    const { u, v } = sphereUv(x / len, y / len, z / len);
+    const h = sample(maps.heightMap, width, height, u, v);
+    return len <= radius * (1 + displace * (h - 0.5));
+  };
+  // March from the front of the outer shell to the middle, then bisect.
+  const steps = 96;
+  let far = Math.sqrt(reach);
+  let z = far;
+  const step = far / steps;
+  let hit = false;
+  for (let i = 0; i <= steps; i++, z -= step) {
+    if (inside(z)) {
+      hit = true;
+      break;
+    }
+    far = z;
+  }
+  if (!hit) return null;
+  let near = z;
+  for (let i = 0; i < 8; i++) {
+    const mid = (near + far) / 2;
+    if (inside(mid)) near = mid;
+    else far = mid;
+  }
+  const len = Math.hypot(x, y, near);
+  return [x / len, y / len, near / len];
+}
+
 /**
  * A material ball: the maps on a sphere, lit from the upper left, seen
  * straight on. Same mapping as the live preview's sphere (the texture goes
- * twice around the equator). Transparent outside the ball; RGBA bytes.
+ * twice around the equator). With `displace`, the height map moves the
+ * surface so the outline is no longer round. Transparent outside the ball;
+ * RGBA bytes.
  */
 export function shadeSphere(
   albedo: RgbImage,
   maps: MapSet,
   size: number,
-  light: [number, number, number] = [-0.55, 0.6, 0.58]
+  light: [number, number, number] = [-0.55, 0.6, 0.58],
+  displace = 0
 ): Uint8ClampedArray {
   const { width, height } = maps;
   const out = new Uint8ClampedArray(size * size * 4);
@@ -112,21 +168,32 @@ export function shadeSphere(
   const [lx, ly, lz] = light.map((v) => v / ll);
   const hl = Math.hypot(lx, ly, lz + 1);
   const [hx, hy, hz] = [lx / hl, ly / hl, (lz + 1) / hl];
-  const radius = 0.94;
+  // The displaced ball still fits the image.
+  const radius = 0.94 / (1 + displace / 2);
   const toSrgb = (v: number) => 255 * Math.min(1, Math.max(0, v) ** (1 / 2.2));
   for (let py = 0; py < size; py++) {
     for (let px = 0; px < size; px++) {
       const x = ((px + 0.5) / size) * 2 - 1;
       const y = 1 - ((py + 0.5) / size) * 2;
-      const r2 = (x * x + y * y) / (radius * radius);
-      if (r2 >= 1) continue;
-      const sx = x / radius;
-      const sy = y / radius;
-      const sz = Math.sqrt(1 - sx * sx - sy * sy);
-      const theta = Math.acos(sy);
-      const phi = Math.atan2(-sz, sx);
-      const u = phi / Math.PI;
-      const v = theta / Math.PI;
+      let sx: number;
+      let sy: number;
+      let sz: number;
+      let coverage: number;
+      if (displace > 0) {
+        const dir = displacedHit(x, y, radius, displace, maps);
+        if (!dir) continue;
+        [sx, sy, sz] = dir;
+        coverage = 1;
+      } else {
+        const r2 = (x * x + y * y) / (radius * radius);
+        if (r2 >= 1) continue;
+        sx = x / radius;
+        sy = y / radius;
+        sz = Math.sqrt(1 - sx * sx - sy * sy);
+        // Soft edge over the last pixel or so.
+        coverage = Math.min(1, (1 - Math.sqrt(r2)) * size * radius * 0.5);
+      }
+      const { phi, u, v } = sphereUv(sx, sy, sz);
       const tx = -Math.sin(phi);
       const tz = -Math.cos(phi);
       // B = N x T
@@ -160,9 +227,7 @@ export function shadeSphere(
       out[i] = shadeOf(sample(albedo.r, width, height, u, v));
       out[i + 1] = shadeOf(sample(albedo.g, width, height, u, v));
       out[i + 2] = shadeOf(sample(albedo.b, width, height, u, v));
-      // Soft edge over the last pixel or so.
-      const edge = (1 - Math.sqrt(r2)) * size * radius * 0.5;
-      out[i + 3] = 255 * Math.min(1, edge);
+      out[i + 3] = 255 * coverage;
     }
   }
   return out;

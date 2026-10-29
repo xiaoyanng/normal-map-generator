@@ -14,7 +14,8 @@ The normal map generator engine behind [normalmap.io](https://normalmap.io), as 
 - **Roughness and ambient occlusion** from the same surface, with contrast, level and invert controls.
 - **Seamless textures.** A variance-preserving blend makes any image tile, and every filter wraps at the edges.
 - **OpenGL or DirectX** normal maps (green channel up or down).
-- **16-bit PNG** for height and displacement, plus a ZIP writer for the whole set. No image libraries needed.
+- **16-bit PNG** for height and displacement, an **RGBA PNG** writer that keeps straight alpha for packed maps (Unity metallic + smoothness, HDRP mask), and a ZIP writer for the whole set. No image libraries needed.
+- **Software material balls** (`shadeSphere`), with optional displacement that changes the outline, for thumbnails and docs.
 - **WebGL2 3D preview**: plane or sphere with displacement, lit by a light that follows the pointer.
 - **Tiled inference** for any 256 px image-to-normals model, at any image size, without visible tile seams.
 

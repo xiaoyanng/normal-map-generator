@@ -1,8 +1,9 @@
 /**
- * File output without libraries: 16-bit grayscale PNG (deflate comes from
- * the caller, `CompressionStream` in browsers, zlib in Node) and a stored
- * (uncompressed) ZIP for downloading every map at once. PNG data is already
- * compressed, so storing loses nothing.
+ * File output without libraries: 16-bit grayscale PNG, 8-bit RGBA PNG with
+ * straight alpha (deflate comes from the caller, `CompressionStream` in
+ * browsers, zlib in Node) and a stored (uncompressed) ZIP for downloading
+ * every map at once. PNG data is already compressed, so storing loses
+ * nothing.
  */
 
 const CRC_TABLE = (() => {
@@ -80,6 +81,43 @@ export async function encodeGray16Png(
     chunk('IEND', new Uint8Array(0)),
   ];
   return concat(parts);
+}
+
+/**
+ * 8-bit RGBA PNG from four 0..1 planes. Alpha is data here (packed maps
+ * such as smoothness), so the color channels are written as they are; a
+ * canvas would premultiply them and lose the values where alpha is low.
+ */
+export async function encodeRgbaPng(
+  planes: [Float32Array, Float32Array, Float32Array, Float32Array],
+  width: number,
+  height: number,
+  deflate: Deflate
+): Promise<Uint8Array> {
+  const stride = width * 4 + 1;
+  const raw = new Uint8Array(stride * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * stride] = 0;
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      for (let c = 0; c < 4; c++) {
+        const v = Math.min(1, Math.max(0, planes[c][i]));
+        raw[y * stride + 1 + x * 4 + c] = Math.round(v * 255);
+      }
+    }
+  }
+  const header = new Uint8Array(13);
+  const hv = new DataView(header.buffer);
+  hv.setUint32(0, width);
+  hv.setUint32(4, height);
+  header[8] = 8; // bit depth
+  header[9] = 6; // RGBA
+  return concat([
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', header),
+    chunk('IDAT', await deflate(raw)),
+    chunk('IEND', new Uint8Array(0)),
+  ]);
 }
 
 function concat(parts: Uint8Array[]): Uint8Array {

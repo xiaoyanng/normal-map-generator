@@ -246,6 +246,8 @@ export class Preview {
   yaw = 0;
   pitch = 0.35;
   spinning = true;
+  /** How far the sphere's surface moves with the height map. */
+  displace = 0.035;
   onFirstFrame?: () => void;
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -393,7 +395,7 @@ export class Preview {
     gl.uniformMatrix4fv(u.uProj, false, perspective(fov, w / h, 0.1, 20));
     gl.uniformMatrix4fv(u.uModel, false, model);
     gl.uniform1f(u.uRepeat, this.repeat);
-    gl.uniform1f(u.uDisplace, plane ? 0 : 0.035);
+    gl.uniform1f(u.uDisplace, plane ? 0 : this.displace);
     gl.uniform3f(u.uLight, light[0], light[1], light[2]);
     gl.uniform3f(u.uEye, 0, 0, 0);
     gl.uniform1f(u.uFlipY, this.flipY);
